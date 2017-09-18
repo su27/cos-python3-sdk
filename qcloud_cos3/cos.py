@@ -1,4 +1,8 @@
 import os
+import aiohttp
+from aiohttp import MultipartWriter
+from aiohttp.hdrs import CONTENT_DISPOSITION, CONTENT_TYPE
+from aiohttp.payload import StringPayload, BytesPayload
 from collections import namedtuple
 import requests
 from io import BytesIO
@@ -12,7 +16,26 @@ CosConfig = namedtuple(
 )
 
 
-class CosBucket:
+class MyWriter(MultipartWriter):
+
+    def __init__(self, subtype='mixed', boundary=None):
+        super().__init__(subtype=subtype, boundary=boundary)
+        self._content_type = self._content_type.replace('"', '')
+
+    def append_payload(self, payload):
+        """Adds a new body part to multipart writer."""
+        if payload.content_type == 'application/octet-stream':
+            payload.headers[CONTENT_TYPE] = payload.content_type
+
+        # render headers
+        headers = ''.join(
+            [k + ': ' + v + '\r\n' for k, v in payload.headers.items()]
+        ).encode('utf-8') + b'\r\n'
+
+        self._parts.append((payload, headers, '', ''))
+
+
+class CosBucket(object):
 
     def __init__(self, app_id, secret_id, secret_key, bucket_name, region='sh'):
         """初始化操作
@@ -70,7 +93,7 @@ class CosBucket:
         }
         return requests.get(url, headers=headers).json()
 
-    def query_folder(self, dir_name):
+    def stat_folder(self, dir_name):
         """
         查询目录属性(https://www.qcloud.com/document/product/436/6063)
         """
@@ -80,7 +103,6 @@ class CosBucket:
             dir_name=dir_name
         )
         headers = {
-            'Content-Type': 'application/json',
             'Authorization': self.signer.sign_more(self.config.bucket, '', 30)
         }
         return requests.get(url, headers=headers).json()
@@ -128,6 +150,42 @@ class CosBucket:
             files={'filecontent': ('', file_stream, mime)},
             headers=headers
         ).json()
+
+    async def async_upload_file(self, file_content, upload_filename, dir_name="",
+                                biz_attr='', replace=True, mime='image/jpeg'):
+        """
+        由于COS不支持带引号的boundary，需要重写writer以生成不带引号的版本
+        """
+        TIMEOUT = 6
+        insert = '0' if replace else '1'
+        dir_name = dir_name.strip('/')
+        url = self._format_url('/files/v2/{app_id}/{bucket}')
+        if dir_name is not None:
+            url += '/' + dir_name
+        url += '/' + upload_filename
+        headers = {
+            'Authorization': self.signer.sign_more(self.config.bucket, '', 30)
+        }
+        pl_op = StringPayload('upload')
+        pl_op.set_content_disposition('form-data', name='op')
+        pl_bz = StringPayload(biz_attr)
+        pl_bz.set_content_disposition('form-data', name='biz_attr')
+        pl_ir = StringPayload(insert)
+        pl_ir.set_content_disposition('form-data', name='insertOnly')
+        pl_fc = BytesPayload(file_content)
+        pl_fc.set_content_disposition('form-data', name='filecontent', filename='')
+        pl_fc._headers[CONTENT_DISPOSITION] = 'form-data; name="filecontent"; filename=""'
+        with MyWriter('form-data') as writer:
+            writer.append(pl_op)
+            writer.append(pl_bz)
+            writer.append(pl_ir)
+            writer.append(pl_fc)
+
+        conn = aiohttp.TCPConnector(verify_ssl=False)
+        async with aiohttp.ClientSession(connector=conn) as session:
+            async with session.post(url, data=writer, headers=headers,
+                                    timeout=TIMEOUT) as resp:
+                return await resp.json()
 
     def _upload_slice_control(self, file_size, slice_size, biz_attr, replace):
         headers = {
