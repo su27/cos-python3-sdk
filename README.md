@@ -1,3 +1,1 @@
-# 腾讯云对象存储服务(cos) Python3.5 SDK
-
-* 本项目fork自[cos-python3-sdk](https://github.com/imu-hupeng/cos-python3-sdk)
+My fork has been moved to https://github.com/su27/qcloud_cos_py3
